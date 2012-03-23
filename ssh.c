@@ -30,9 +30,16 @@
 #include <sys/time.h>
 #include <syslog.h>
 #include <string.h>
+#include <pthread.h>
+#include <gcrypt.h>
+#include <errno.h>
 
 #include "remote.h"
 #include "ssh.h"
+#include "global.h"
+
+/* libgcrypt MACRO to initialise gcrypts pthread functionality */
+GCRY_THREAD_OPTION_PTHREAD_IMPL;
 
 /* Taken from the libssh2 examples
  * Waits for a max of 10 seconds for a response  */
@@ -67,6 +74,10 @@ static int waitsocket(int socket_fd, LIBSSH2_SESSION *session)
 char** execute_command(struct remote *rm,char commands[][12], int num_commands)
 {
 
+    /* Sets up the pthread functionality of gcrypt
+     * libssh2 doesn't do this for us so we have to do it ourselves*/
+    gcry_control(GCRYCTL_SET_THREAD_CBS, &gcry_threads_pthread);
+
     openlog("remote-monitor-base",LOG_PID|LOG_CONS,LOG_USER);
 
     char *hostname = rm->hostname;
@@ -96,8 +107,11 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
     for(int i = 0; i < num_commands; i++)
         results[i] = malloc(2000 * sizeof(char));
 
-    /* Initialise libssh2 and check to see if it was initialized properly  */
+    /* Initialise libssh2 and check to see if it was initialized properly
+     * libssh2_init isn't thread safe so we need to lock the thread while it executes*/
+    pthread_mutex_lock(&sshinit_lock);
     int rc = libssh2_init(0);
+    pthread_mutex_unlock(&sshinit_lock);
     if(rc!=0) {
         syslog(LOG_ERR,"libssh2 initilization failed");
         return NULL;
