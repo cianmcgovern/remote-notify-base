@@ -32,6 +32,7 @@ struct remote {
     int port;
     char **commands;
     int num_commands;
+    char **results;
 };
 
 #endif

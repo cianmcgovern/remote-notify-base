@@ -23,6 +23,6 @@
 
 #include "remote.h"
 
-char** execute_command(struct remote*,char[][12], int);
+int execute_command(struct remote*);
 
 #endif

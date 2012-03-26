@@ -71,7 +71,7 @@ static int waitsocket(int socket_fd, LIBSSH2_SESSION *session)
     return rc;
 }
 
-char** execute_command(struct remote *rm,char commands[][12], int num_commands)
+int execute_command(struct remote *rm)
 {
 
     /* Sets up the pthread functionality of gcrypt
@@ -80,15 +80,7 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
 
     openlog("remote-monitor-base",LOG_PID|LOG_CONS,LOG_USER);
 
-    char *hostname = rm->hostname;
-    char *username = rm->username;
-    char *password = rm->password;
-    char *privatekey = rm->privatekey;
-    char *privatekeypassword = rm->privatekeypassword;
-    char *publickey = rm->publickey;
-    int port = rm->port;
-    
-    syslog(LOG_DEBUG,"Starting SSH execution on hostname: %s with username: %s and port: %d",hostname,username,port);
+    syslog(LOG_DEBUG,"Starting SSH execution on rm->hostname: %s with rm->username: %s and port: %d",rm->hostname,rm->username,rm->port);
 
     size_t len;
     int type;
@@ -106,9 +98,9 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
 
     /* results stores the output from the commands after they're executed
      * Each command  has a corresponding result so the results array is set to the same length as the commands array  */
-    char **results = malloc(num_commands * sizeof(char*));
-    for(int i = 0; i < num_commands; i++)
-        results[i] = malloc(2000 * sizeof(char));
+    rm->results = malloc(rm->num_commands * sizeof(char*));
+    for(int i = 0; i < rm->num_commands; i++)
+        rm->results[i] = malloc(2048 * sizeof(char));
 
     /* Initialise libssh2 and check to see if it was initialized properly
      * libssh2_init isn't thread safe so we need to lock the thread while it executes*/
@@ -117,27 +109,27 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
     pthread_mutex_unlock(&sshinit_lock);
     if(rc!=0) {
         syslog(LOG_ERR,"libssh2 initilization failed");
-        return NULL;
+        return 1;
     }
 
     /* Creates a socket connection to the specified host on the specified port */
-    hostaddress = inet_addr(hostname);
+    hostaddress = inet_addr(rm->hostname);
     sock = socket(AF_INET, SOCK_STREAM, 0);
     sin.sin_family = AF_INET;
-    sin.sin_port = htons(port);
+    sin.sin_port = htons(rm->port);
     sin.sin_addr.s_addr = hostaddress;
 
     /* Check to see if the connection was successful */
     if(connect(sock, (struct sockaddr*)(&sin), sizeof(struct sockaddr_in)) != 0) {
-        syslog(LOG_ERR,"Failed to connect to %s on port %d", hostname, port);
-        return NULL;
+        syslog(LOG_ERR,"Failed to connect to %s on port %d", rm->hostname, rm->port);
+        return 1;
     }
 
     /* Initialise the session and check for success */
     session = libssh2_session_init();
     if(!session) {
-        syslog(LOG_ERR,"Error creating session on host %s", hostname);
-        return NULL;
+        syslog(LOG_ERR,"Error creating session on host %s", rm->hostname);
+        return 1;
     }
 
     /* Disable blocking for this session */
@@ -146,15 +138,15 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
     /* Start the session on the specified socket and check for success */
     while( (rc = libssh2_session_startup(session,sock)) == LIBSSH2_ERROR_EAGAIN);
     if(rc) {
-        syslog(LOG_ERR,"Failure establishing SSH session %d on host %s", rc, hostname);
-        return NULL;
+        syslog(LOG_ERR,"Failure establishing SSH session %d on host %s", rc, rm->hostname);
+        goto error;
     }
 
     /* Get the current host key and check to see if it matches with any known hosts */
     nh = libssh2_knownhost_init(session);
     if(!nh) {
-        syslog(LOG_ERR,"Error while initialising known hosts collection on host %s",hostname);
-        return NULL;
+        syslog(LOG_ERR,"Error while initialising known hosts collection on host %s",rm->hostname);
+        goto error;
     }
     libssh2_knownhost_readfile(nh,"known_hosts",LIBSSH2_KNOWNHOST_FILE_OPENSSH);
     //libssh2_knownhost_writefile(nh,"dumpfile",LIBSSH2_KNOWNHOST_FILE_OPENSSH);
@@ -163,76 +155,76 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
     if(fingerprint) {
         struct libssh2_knownhost *host;
 
-        int check = libssh2_knownhost_checkp(nh,hostname,port,fingerprint,len
+        int check = libssh2_knownhost_checkp(nh,rm->hostname,rm->port,fingerprint,len
                 ,LIBSSH2_KNOWNHOST_TYPE_PLAIN|LIBSSH2_KNOWNHOST_KEYENC_RAW,&host);
 
         if(check == LIBSSH2_KNOWNHOST_CHECK_MATCH)
-            syslog(LOG_DEBUG,"Found matching host key for host %s",hostname);
+            syslog(LOG_DEBUG,"Found matching host key for host %s",rm->hostname);
         else if(check == LIBSSH2_KNOWNHOST_CHECK_MISMATCH)
-            syslog(LOG_ERR,"Host key was found but the key's didn't match for host %s",hostname);
+            syslog(LOG_ERR,"Host key was found but the key's didn't match for host %s",rm->hostname);
             //TODO Some sort of critical error will need to be generated here
         else if(check == LIBSSH2_KNOWNHOST_CHECK_NOTFOUND)
-            syslog(LOG_ERR,"No host match was found for %s",hostname);
+            syslog(LOG_ERR,"No host match was found for %s",rm->hostname);
             //TODO Have the ability to add the host key here
         else
-            syslog(LOG_ERR,"There was a failure while attempting to match host keys for host %s",hostname);
+            syslog(LOG_ERR,"There was a failure while attempting to match host keys for host %s",rm->hostname);
     }
     else {
-        syslog(LOG_ERR,"Couldn't get host key for host: %s",hostname);
-        return NULL;
+        syslog(LOG_ERR,"Couldn't get host key for host: %s",rm->hostname);
+        goto error;
     }
 
     libssh2_knownhost_free(nh);
 
-    /* Authenticate with the specified username and passwod and check for success */
+    /* Authenticate with the specified rm->username and passwod and check for success */
     // TODO Add ability to authenticate with a private key
-    if( (strlen(password)) != 0 ) {
-        syslog(LOG_DEBUG,"Using password authentication for host %s",hostname);
-        while( (rc = libssh2_userauth_password(session,username,password)) == LIBSSH2_ERROR_EAGAIN);
+    if( (strlen(rm->password)) != 0 ) {
+        syslog(LOG_DEBUG,"Using rm->password authentication for host %s",rm->hostname);
+        while( (rc = libssh2_userauth_password(session,rm->username,rm->password)) == LIBSSH2_ERROR_EAGAIN);
         if(rc) {
-            syslog(LOG_ERR,"Authentication to host %s failed",hostname);
-            goto shutdown;
+            syslog(LOG_ERR,"Authentication to host %s failed",rm->hostname);
+            goto error;
         }
     }
-    else if( ( (strlen(publickey)) != 0 ) && ( ( strlen(privatekey)) != 0) ) {
-        syslog(LOG_DEBUG,"Using public key authentication for host %s",hostname);
-        while( (rc = libssh2_userauth_publickey_fromfile(session,username,publickey,privatekey,NULL)) == LIBSSH2_ERROR_EAGAIN);
+    else if( ( (strlen(rm->publickey)) != 0 ) && ( ( strlen(rm->privatekey)) != 0) ) {
+        syslog(LOG_DEBUG,"Using public key authentication for host %s",rm->hostname);
+        while( (rc = libssh2_userauth_publickey_fromfile(session,rm->username,rm->publickey,rm->privatekey,NULL)) == LIBSSH2_ERROR_EAGAIN);
 
         switch(rc) {
             case 0:
                 break;
             case LIBSSH2_ERROR_AUTHENTICATION_FAILED:
-                syslog(LOG_ERR,"Authentication using the supplied key for host %s was not accepted",hostname);
+                syslog(LOG_ERR,"Authentication using the supplied key for host %s was not accepted",rm->hostname);
                 goto shutdown;
             case LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED:
-                syslog(LOG_ERR,"The username/public key combination was invalid for host %s",hostname);
+                syslog(LOG_ERR,"The rm->username/public key combination was invalid for host %s",rm->hostname);
                 goto shutdown;
             default:
-                syslog(LOG_ERR,"Authentication to host %s failed",hostname);
+                syslog(LOG_ERR,"Authentication to host %s failed",rm->hostname);
                 goto shutdown;
         }
     }
     
     /* Open a session for each command */
-    for(int i = 0; i < num_commands; i++) {
+    for(int i = 0; i < rm->num_commands; i++) {
 
         /* Open a channel on the current channel and check for success */
         while( (channel = libssh2_channel_open_session(session)) == NULL && libssh2_session_last_error(session,NULL,NULL,0) == LIBSSH2_ERROR_EAGAIN) {
             waitsocket(sock,session);
         }
         if(channel == NULL) {
-            syslog(LOG_ERR,"Error opening SSH channel on host %s",hostname);
-            asprintf(&(results[i]),NULL);
+            syslog(LOG_ERR,"Error opening SSH channel on host %s",rm->hostname);
+            asprintf(&(rm->results[i]),NULL);
             break;
         }
 
         /* Execute the command and check for success */
-        while( (rc = libssh2_channel_exec(channel,commands[i])) == LIBSSH2_ERROR_EAGAIN) {
+        while( (rc = libssh2_channel_exec(channel,rm->commands[i])) == LIBSSH2_ERROR_EAGAIN) {
             waitsocket(sock,session);
         }
         if(rc!=0) {
-            syslog(LOG_ERR,"Error while executing %s in channel on host %s",commands[i],hostname);
-            asprintf(&(results[i]),NULL); 
+            syslog(LOG_ERR,"Error while executing %s in channel on host %s",rm->commands[i],rm->hostname);
+            asprintf(&(rm->results[i]),NULL); 
             break;
         }
 
@@ -249,9 +241,9 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
                     bytecount += rc;
                     char *output;
                     output = buffer;
-                    syslog(LOG_ERR,"Got output from command %s on host %s:%s",commands[i],hostname,output);
+                    syslog(LOG_ERR,"Got output from command %s on host %s:%s",rm->commands[i],rm->hostname,output);
                     /* Store the output in the results array */
-                    asprintf(&(results[i]),"%s",output);
+                    asprintf(&(rm->results[i]),"%s",output);
                     memset(buffer,0,2048);
                 }
             } while(rc > 0);
@@ -269,13 +261,13 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
             waitsocket(sock,session);
         }
         if( (libssh2_channel_free(channel)) < 0)
-            syslog(LOG_ERR,"Error while freeing channel on host %s",hostname);
+            syslog(LOG_ERR,"Error while freeing channel on host %s",rm->hostname);
         channel = NULL;
     }
 
 shutdown:
 
-    syslog(LOG_DEBUG,"Disconnecting SSH session for host %s",hostname);
+    syslog(LOG_DEBUG,"Disconnecting SSH session for host %s",rm->hostname);
 
     libssh2_session_disconnect(session,"Normal SSH disconnection");
     libssh2_session_free(session);
@@ -286,5 +278,18 @@ shutdown:
 
     closelog();
 
-    return results;
+    return 0;
+
+error:
+
+    syslog(LOG_DEBUG,"Disconnection SSH session for host %s",rm->hostname);
+
+    libssh2_session_disconnect(session,"Normal SSH disconnection");
+    libssh2_session_free(session);
+
+    close(sock);
+
+    closelog();
+
+    return 1;
 }
