@@ -26,6 +26,9 @@ struct remote {
     char *hostname;
     char *username;
     char *password;
+    char *publickey;
+    char *privatekey;
+    char *privatekeypassword;
     int port;
     char **commands;
     int num_commands;

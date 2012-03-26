@@ -83,6 +83,9 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
     char *hostname = rm->hostname;
     char *username = rm->username;
     char *password = rm->password;
+    char *privatekey = rm->privatekey;
+    char *privatekeypassword = rm->privatekeypassword;
+    char *publickey = rm->publickey;
     int port = rm->port;
     
     syslog(LOG_DEBUG,"Starting SSH execution on hostname: %s with username: %s and port: %d",hostname,username,port);
@@ -183,10 +186,31 @@ char** execute_command(struct remote *rm,char commands[][12], int num_commands)
 
     /* Authenticate with the specified username and passwod and check for success */
     // TODO Add ability to authenticate with a private key
-    while( (rc = libssh2_userauth_password(session,username,password)) == LIBSSH2_ERROR_EAGAIN);
-    if(rc) {
-        syslog(LOG_ERR,"Authentication to host %s failed",hostname);
-        goto shutdown;
+    if( (strlen(password)) != 0 ) {
+        syslog(LOG_DEBUG,"Using password authentication for host %s",hostname);
+        while( (rc = libssh2_userauth_password(session,username,password)) == LIBSSH2_ERROR_EAGAIN);
+        if(rc) {
+            syslog(LOG_ERR,"Authentication to host %s failed",hostname);
+            goto shutdown;
+        }
+    }
+    else if( ( (strlen(publickey)) != 0 ) && ( ( strlen(privatekey)) != 0) ) {
+        syslog(LOG_DEBUG,"Using public key authentication for host %s",hostname);
+        while( (rc = libssh2_userauth_publickey_fromfile(session,username,publickey,privatekey,NULL)) == LIBSSH2_ERROR_EAGAIN);
+
+        switch(rc) {
+            case 0:
+                break;
+            case LIBSSH2_ERROR_AUTHENTICATION_FAILED:
+                syslog(LOG_ERR,"Authentication using the supplied key for host %s was not accepted",hostname);
+                goto shutdown;
+            case LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED:
+                syslog(LOG_ERR,"The username/public key combination was invalid for host %s",hostname);
+                goto shutdown;
+            default:
+                syslog(LOG_ERR,"Authentication to host %s failed",hostname);
+                goto shutdown;
+        }
     }
     
     /* Open a session for each command */
