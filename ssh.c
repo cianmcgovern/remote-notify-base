@@ -195,13 +195,13 @@ int execute_command(struct remote *rm)
                 break;
             case LIBSSH2_ERROR_AUTHENTICATION_FAILED:
                 syslog(LOG_ERR,"Authentication using the supplied key for host %s was not accepted",rm->hostname);
-                goto shutdown;
+                goto error;
             case LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED:
                 syslog(LOG_ERR,"The rm->username/public key combination was invalid for host %s",rm->hostname);
-                goto shutdown;
+                goto error;
             default:
                 syslog(LOG_ERR,"Authentication to host %s failed",rm->hostname);
-                goto shutdown;
+                goto error;
         }
     }
     
@@ -288,6 +288,8 @@ error:
     libssh2_session_free(session);
 
     close(sock);
+
+    libssh2_exit();
 
     closelog();
 
